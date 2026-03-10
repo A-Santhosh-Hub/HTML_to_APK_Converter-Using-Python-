@@ -4,10 +4,10 @@ plugins {
 
 android {
     compileSdk 34
-    namespace 'com.santhosh.generatedapp'
+    namespace 'com.santhosh.mywebapp'
 
     defaultConfig {
-        applicationId "com.santhosh.generatedapp"
+        applicationId "com.santhosh.mywebapp"
         minSdk 24
         targetSdk 34
         versionCode 1

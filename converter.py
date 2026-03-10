@@ -1,13 +1,13 @@
 """
-HTML to APK Builder  v3.0
+HTML to APK Builder  v4.0
 Developed by SANTHOSH A
 
-FIXED IN v3.0:
-  - "unclosed string literal" Java compile errors ELIMINATED
-  - JS shim written as a clean asset file (bridge.js), not embedded Java strings
-  - MainActivity.java uses clean, readable Java — no Python escape conflicts
-  - Windows rmtree locking fix retained
-  - All download / live-preview / permission fixes from v2 retained
+NEW IN v4.0:
+  - Interactive setup wizard on every run
+  - Auto-generates App Name + Package ID from your HTML <title> tag
+  - You can accept the suggestion or type your own values
+  - Version number and author domain also prompted
+  - All v3.0 fixes retained (no compile errors, downloads, live preview)
 """
 
 import os, sys, re, shutil, subprocess, platform, logging, stat, time
@@ -34,7 +34,7 @@ COMPILE_SDK  = 34
 
 BANNER = """
 +--------------------------------------------------------------+
-|         HTML  ->  APK  Builder   v3.0                       |
+|         HTML  ->  APK  Builder   v4.0                       |
 |         Developed by SANTHOSH A                             |
 +--------------------------------------------------------------+
 """
@@ -831,7 +831,7 @@ def gen_main_activity(pkg: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def gen_build_gradle(pkg: str) -> str:
+def gen_build_gradle(pkg: str, version_name: str = VERSION_NAME, version_code: int = VERSION_CODE) -> str:
     lines = [
         "plugins {",
         "    id 'com.android.application'",
@@ -1059,7 +1059,9 @@ def robust_rmtree(path: Path, retries: int = 5, delay: float = 0.5):
 # ─────────────────────────────────────────────────────────────────────────────
 def build_android_project(features: dict, html_path: Path,
                            pkg: str = PACKAGE_NAME,
-                           app_name: str = APP_NAME) -> Path:
+                           app_name: str = APP_NAME,
+                           version_name: str = VERSION_NAME,
+                           version_code: int = VERSION_CODE) -> Path:
     log.info("=== STEP 3: Building Android project structure ===")
     proj = BUILD_DIR
     if proj.exists():
@@ -1104,7 +1106,7 @@ def build_android_project(features: dict, html_path: Path,
     w(proj / "app/src/main/res/xml/file_provider_paths.xml",     gen_file_provider_paths())
 
     # Gradle
-    w(proj / "app/build.gradle",          gen_build_gradle(pkg))
+    w(proj / "app/build.gradle",          gen_build_gradle(pkg, version_name, version_code))
     w(proj / "settings.gradle",           gen_settings_gradle(app_name))
     w(proj / "build.gradle",              gen_root_build_gradle())
     w(proj / "gradle.properties",         gen_gradle_properties())
@@ -1179,7 +1181,8 @@ def compile_apk(project_dir: Path) -> bool:
         return False
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    dest = OUTPUT_DIR / "app.apk"
+    apk_slug = re.sub(r'[^a-zA-Z0-9_\-]', '_', pkg.split(".")[-1])
+    dest = OUTPUT_DIR / (apk_slug + ".apk")
     shutil.copy2(apks[0], dest)
     log.info("   APK -> " + str(dest) + "  (%.1f KB)" % (dest.stat().st_size / 1024))
     return True
@@ -1188,13 +1191,14 @@ def compile_apk(project_dir: Path) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 6  —  SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
-def print_summary(features: dict, project_dir: Path, apk_built: bool):
+def print_summary(features: dict, project_dir: Path, apk_built: bool,
+                  app_name: str = APP_NAME, package_name: str = PACKAGE_NAME):
     log.info("")
     log.info("=" * 62)
-    log.info("  BUILD SUMMARY  —  HTML to APK Builder v3.0")
+    log.info("  BUILD SUMMARY  —  HTML to APK Builder v4.0")
     log.info("=" * 62)
-    log.info("  Package  : " + PACKAGE_NAME)
-    log.info("  App Name : " + APP_NAME)
+    log.info("  Package  : " + package_name)
+    log.info("  App Name : " + app_name)
     log.info("  Min SDK  : " + str(MIN_SDK) + "  (Android 7.0+)")
     log.info("  Target   : API " + str(TARGET_SDK))
     log.info("")
@@ -1224,25 +1228,175 @@ def print_summary(features: dict, project_dir: Path, apk_built: bool):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# APP IDENTITY WIZARD
+# ─────────────────────────────────────────────────────────────────────────────
+
+def extract_title_from_html(html_path: Path) -> str:
+    """Pull the <title> text from the HTML file, return empty string if not found."""
+    try:
+        content = html_path.read_text(encoding="utf-8", errors="replace")
+        m = re.search(r'<title[^>]*>(.*?)</title>', content, re.IGNORECASE | re.DOTALL)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def slugify(text: str) -> str:
+    """
+    Convert any string into a safe lowercase identifier segment.
+    e.g. "My Text Converter!" -> "mytextconverter"
+    """
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9\s]', '', text)   # remove non-alphanumeric
+    text = re.sub(r'\s+', '', text)             # collapse spaces
+    text = text[:30]                            # limit length
+    return text or "myapp"
+
+
+def make_package_id(domain: str, app_slug: str) -> str:
+    """Build a valid Android package name from domain + app slug."""
+    domain_clean = re.sub(r'[^a-z0-9]', '', domain.lower())
+    if not domain_clean:
+        domain_clean = "santhosh"
+    return "com." + domain_clean + "." + app_slug
+
+
+def prompt(label: str, default: str) -> str:
+    """
+    Show a prompt with a suggested default value.
+    User presses Enter to accept, or types a new value.
+    """
+    try:
+        answer = input("  %s [%s]: " % (label, default)).strip()
+        return answer if answer else default
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+
+
+def validate_package(pkg: str) -> bool:
+    """Ensure the package name is a valid Android identifier."""
+    parts = pkg.split(".")
+    if len(parts) < 2:
+        return False
+    return all(re.match(r'^[a-z][a-z0-9_]*$', p) for p in parts)
+
+
+def run_app_wizard(html_path: Path):
+    """
+    Interactive wizard that auto-suggests App Name and Package ID
+    from the HTML <title>, then lets the user confirm or override.
+    Returns (app_name, package_name, version_name, version_code).
+    """
+    print()
+    print("  +----------------------------------------------------------+")
+    print("  |   APP IDENTITY SETUP                                     |")
+    print("  |   Press Enter to accept a suggestion, or type your own   |")
+    print("  +----------------------------------------------------------+")
+    print()
+
+    # ── Suggest App Name from <title> ─────────────────────────
+    html_title = extract_title_from_html(html_path)
+    suggested_name = html_title if html_title else "MyWebApp"
+    print("  Detected HTML title: \"%s\"" % (html_title if html_title else "(none found)"))
+    print()
+
+    app_name = prompt("App Name", suggested_name)
+    if not app_name:
+        app_name = suggested_name
+
+    # ── Suggest Package ID from app name ──────────────────────
+    app_slug      = slugify(app_name)
+    suggested_pkg = make_package_id("santhosh", app_slug)
+
+    print()
+    print("  Auto-generated Package ID: %s" % suggested_pkg)
+
+    while True:
+        pkg = prompt("Package ID", suggested_pkg)
+        if not pkg:
+            pkg = suggested_pkg
+        # Sanitize: lowercase, remove spaces
+        pkg = pkg.lower().replace(" ", "").replace("-", "_")
+        if validate_package(pkg):
+            break
+        print("  [!] Invalid package ID. Use format like: com.yourname.appname")
+        print("      Only lowercase letters, digits, underscores. At least 2 parts.")
+        suggested_pkg = pkg   # keep their attempt as next default
+
+    # ── Version ───────────────────────────────────────────────
+    print()
+    version_name = prompt("Version Name", "1.0")
+    if not version_name:
+        version_name = "1.0"
+
+    try:
+        # Derive version code from version name digits
+        digits = re.sub(r'[^0-9]', '', version_name)
+        version_code = max(1, int(digits[:4])) if digits else 1
+    except Exception:
+        version_code = 1
+
+    # ── Confirm ───────────────────────────────────────────────
+    print()
+    print("  +----------------------------------------------------------+")
+    print("  |   BUILD CONFIGURATION                                    |")
+    print("  +----------------------------------------------------------+")
+    print("  App Name    : " + app_name)
+    print("  Package ID  : " + pkg)
+    print("  Version     : " + version_name + "  (code: " + str(version_code) + ")")
+    print("  Output APK  : output/app.apk")
+    print()
+
+    try:
+        confirm = input("  Proceed with build? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        confirm = "y"
+
+    if confirm in ("n", "no"):
+        print()
+        print("  Build cancelled.")
+        sys.exit(0)
+
+    print()
+    return app_name, pkg, version_name, version_code
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     print(BANNER)
+
     html_path = INPUT_DIR / "index.html"
     if not html_path.exists():
         log.error("Missing: " + str(html_path))
         log.error("Place your index.html inside input_project/ and re-run.")
         sys.exit(1)
 
-    log.info("Input : " + str(html_path))
-    log.info("Pkg   : " + PACKAGE_NAME + "  |  App: " + APP_NAME)
+    # Run the interactive wizard — get app identity from user
+    app_name, package_name, version_name, version_code = run_app_wizard(html_path)
+
+    log.info("Input   : " + str(html_path))
+    log.info("App     : " + app_name)
+    log.info("Package : " + package_name)
+    log.info("Version : " + version_name)
     log.info("")
 
     features    = analyze_html(html_path)
-    project_dir = build_android_project(features, html_path)
+    project_dir = build_android_project(
+        features, html_path,
+        pkg=package_name,
+        app_name=app_name,
+        version_name=version_name,
+        version_code=version_code,
+    )
     apk_built   = compile_apk(project_dir)
-    print_summary(features, project_dir, apk_built)
+    print_summary(features, project_dir, apk_built, app_name, package_name)
 
 
 if __name__ == "__main__":
     main()
+
